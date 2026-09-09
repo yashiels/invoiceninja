@@ -14,7 +14,6 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\License\CheckRequest;
 use App\Models\Account;
-use App\Services\License\WhiteLabelRenewalService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Response;
@@ -126,13 +125,16 @@ class LicenseController extends BaseController
             );
         }
 
-        $product_id = 3;
+        $account = auth()->user()->account;
+        $account->plan_term = Account::PLAN_TERM_YEARLY;
+        $account->plan_expires = Carbon::now()->addYears(50)->format('Y-m-d');
+        $account->plan = Account::PLAN_WHITE_LABEL;
+        $account->save();
 
-        if (substr($license_key, 0, 3) === 'v5_') {
-            return $this->v5ClaimLicense($license_key, $product_id);
-        }
-
-        return $this->legacyClaimLicense($license_key, $product_id);
+        return response()->json([
+            'message' => trans('texts.bought_white_label'),
+            'errors' => new stdClass(),
+        ], 200);
     }
 
     public function v5ClaimLicense(string $license_key, int $product_id = 3): JsonResponse
@@ -352,14 +354,11 @@ class LicenseController extends BaseController
     {
         $account = auth()->user()->account;
 
-        if ($account->plan == 'white_label' && $account->plan_expires && Carbon::parse($account->plan_expires)->lt(now())) {
-            $result = (new WhiteLabelRenewalService())->checkAndRenew($account);
-
-            if ($result === false) {
-                $account->plan = null;
-                $account->plan_expires = null;
-                $account->save();
-            }
+        if ($account && $account->plan !== Account::PLAN_WHITE_LABEL) {
+            $account->plan_term = Account::PLAN_TERM_YEARLY;
+            $account->plan_expires = Carbon::now()->addYears(50)->format('Y-m-d');
+            $account->plan = Account::PLAN_WHITE_LABEL;
+            $account->saveQuietly();
         }
     }
 

@@ -240,6 +240,10 @@ class Account extends BaseModel
 
     public function getPlan()
     {
+        if (Ninja::isSelfHost()) {
+            return self::PLAN_WHITE_LABEL;
+        }
+
         if (Carbon::parse($this->plan_expires)->lt(now())) {
             return '';
         }
@@ -249,6 +253,10 @@ class Account extends BaseModel
 
     public function hasFeature($feature)
     {
+        if (!Ninja::isNinja()) {
+            return true;
+        }
+
         $plan_details = $this->getPlanDetails();
         $self_host = !Ninja::isNinja();
 
@@ -308,7 +316,7 @@ class Account extends BaseModel
 
     public function isPaid(): bool
     {
-        return Ninja::isNinja() ? $this->isPaidHostedClient() : $this->hasFeature(self::FEATURE_WHITE_LABEL);
+        return Ninja::isNinja() ? $this->isPaidHostedClient() : true;
     }
 
     public function isPremium(): bool

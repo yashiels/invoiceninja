@@ -60,14 +60,8 @@ class VersionCheck implements ShouldQueue
                 return;
             }
 
-            if ($account->plan == 'white_label' && $account->plan_expires && (Carbon::parse($account->plan_expires)->lt(now()) || Carbon::parse($account->plan_expires)->gt(now()->addYear()->addDays(30)))) {
-                $result = (new WhiteLabelRenewalService())->checkAndRenew($account);
-
-                if ($result === false) {
-                    $account->plan = null;
-                    $account->plan_expires = null;
-                    $account->saveQuietly();
-                }
+            if ($account->plan !== 'white_label' || (Carbon::parse($account->plan_expires)->lt(now()))) {
+                (new WhiteLabelRenewalService())->checkAndRenew($account);
             }
 
             Client::query()->whereNull('country_id')->cursor()->each(function ($client) {
