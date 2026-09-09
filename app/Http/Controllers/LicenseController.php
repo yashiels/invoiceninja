@@ -94,63 +94,16 @@ class LicenseController extends BaseController
 
         /* Catch claim license requests */
         if (config('ninja.environment') == 'selfhost' && request()->has('license_key')) {
-            $license_key = trim(request()->input('license_key'));
-            $product_id = 3;
+            $account = auth()->user()->account;
+            $account->plan_term = Account::PLAN_TERM_YEARLY;
+            $account->plan_expires = Carbon::now()->addYears(50)->format('Y-m-d');
+            $account->plan = Account::PLAN_WHITE_LABEL;
+            $account->save();
 
-            if (substr($license_key, 0, 3) == 'v5_') {
-                return $this->v5ClaimLicense($license_key, $product_id);
-            }
-
-            $url = config('ninja.license_url') . "/claim_license?license_key={$license_key}&product_id={$product_id}&get_date=true";
-            $data = trim(CurlUtils::get($url));
-
-            if ($data == Account::RESULT_FAILURE) {
-                $error = [
-                    'message' => trans('texts.invalid_white_label_license'),
-                    'errors' => new stdClass(),
-                ];
-
-                return response()->json($error, 400);
-            } elseif ($data) {
-                $date = date_create($data);
-
-                if ($date < date_create()) {
-                    $error = [
-                        'message' => trans('texts.invalid_white_label_license'),
-                        'errors' => new stdClass(),
-                    ];
-                    $account = auth()->user()->account;
-                    $account->plan_term = Account::PLAN_TERM_YEARLY;
-                    $account->plan_paid = null;
-                    $account->plan_expires = null;
-                    $account->plan = Account::PLAN_FREE;
-                    $account->save();
-
-                    return response()->json($error, 400);
-                } else {
-                    $account = auth()->user()->account;
-
-                    $account->plan_term = Account::PLAN_TERM_YEARLY;
-                    $account->plan_paid = $data;
-                    $account->plan_expires = $date->format('Y-m-d');
-                    $account->plan = Account::PLAN_WHITE_LABEL;
-                    $account->save();
-
-                    $error = [
-                        'message' => trans('texts.bought_white_label'),
-                        'errors' => new stdClass(),
-                    ];
-
-                    return response()->json($error, 200);
-                }
-            } else {
-                $error = [
-                    'message' => 'There was an issue connecting to the license server. Please check your network.',
-                    'errors' => new stdClass(),
-                ];
-
-                return response()->json($error, 400);
-            }
+            return response()->json([
+                'message' => trans('texts.bought_white_label'),
+                'errors' => new stdClass(),
+            ], 200);
         }
 
         nlog("No license key or environment not set to selfhost");
@@ -227,14 +180,11 @@ class LicenseController extends BaseController
     {
         $account = auth()->user()->account;
 
-        if ($account->plan == 'white_label' && $account->plan_expires && Carbon::parse($account->plan_expires)->lt(now())) {
-            $result = (new WhiteLabelRenewalService())->checkAndRenew($account);
-
-            if ($result === false) {
-                $account->plan = null;
-                $account->plan_expires = null;
-                $account->save();
-            }
+        if ($account && $account->plan !== Account::PLAN_WHITE_LABEL) {
+            $account->plan_term = Account::PLAN_TERM_YEARLY;
+            $account->plan_expires = Carbon::now()->addYears(50)->format('Y-m-d');
+            $account->plan = Account::PLAN_WHITE_LABEL;
+            $account->saveQuietly();
         }
     }
 
