@@ -86,7 +86,67 @@ class ZugferdXmlValidationTest extends TestCase
             }
         }
 
-        $this->assertCount(0, $flat_errors, "XML validation failed for: {$context}\n".implode("\n", $flat_errors));
+        $this->assertCount(0, $flat_errors, "XML validation failed for: {$context}\n" . implode("\n", $flat_errors));
+    }
+
+    private function assertLineAllowance(
+        string $xml,
+        string $expectedPrice,
+        string $expectedAllowance,
+        string $expectedLineTotal
+    ): void {
+        $dom = new \DOMDocument();
+        $this->assertTrue($dom->loadXML($xml));
+
+        $xpath = new \DOMXPath($dom);
+        $xpath->registerNamespace('ram', 'urn:un:unece:uncefact:data:standard:ReusableAggregateBusinessInformationEntity:100');
+        $xpath->registerNamespace('udt', 'urn:un:unece:uncefact:data:standard:UnqualifiedDataType:100');
+
+        $line = '//ram:IncludedSupplyChainTradeLineItem[1]';
+        $allowance = $line . '/ram:SpecifiedLineTradeSettlement/ram:SpecifiedTradeAllowanceCharge';
+
+        $this->assertSame($expectedPrice, $this->singleXPathValue($xpath, $line . '/ram:SpecifiedLineTradeAgreement/ram:NetPriceProductTradePrice/ram:ChargeAmount'));
+        $this->assertSame('false', $this->singleXPathValue($xpath, $allowance . '/ram:ChargeIndicator/udt:Indicator'));
+        $this->assertSame($expectedAllowance, $this->singleXPathValue($xpath, $allowance . '/ram:ActualAmount'));
+        $this->assertSame('Discount', $this->singleXPathValue($xpath, $allowance . '/ram:Reason'));
+        $this->assertSame($expectedLineTotal, $this->singleXPathValue($xpath, $line . '/ram:SpecifiedLineTradeSettlement/ram:SpecifiedTradeSettlementLineMonetarySummation/ram:LineTotalAmount'));
+
+        $grossPriceAllowances = $xpath->query($line . '/ram:SpecifiedLineTradeAgreement/ram:GrossPriceProductTradePrice/ram:AppliedTradeAllowanceCharge');
+        $this->assertNotFalse($grossPriceAllowances);
+        $this->assertSame(0, $grossPriceAllowances->length);
+    }
+
+    private function singleXPathValue(\DOMXPath $xpath, string $expression): string
+    {
+        $nodes = $xpath->query($expression);
+        $this->assertNotFalse($nodes);
+        $this->assertSame(1, $nodes->length, "Expected exactly one node for XPath: {$expression}");
+
+        return trim($nodes->item(0)?->textContent ?? '');
+    }
+
+    /**
+     * @param array<string, string> $expectedAmounts
+     */
+    private function assertHeaderAmounts(string $xml, array $expectedAmounts): void
+    {
+        $dom = new \DOMDocument();
+        $this->assertTrue($dom->loadXML($xml));
+
+        $xpath = new \DOMXPath($dom);
+        $xpath->registerNamespace('ram', 'urn:un:unece:uncefact:data:standard:ReusableAggregateBusinessInformationEntity:100');
+        $xpath->registerNamespace('udt', 'urn:un:unece:uncefact:data:standard:UnqualifiedDataType:100');
+
+        $settlement = '//ram:ApplicableHeaderTradeSettlement';
+        $summation = $settlement.'/ram:SpecifiedTradeSettlementHeaderMonetarySummation';
+
+        $this->assertSame($expectedAmounts['allowance'], $this->singleXPathValue($xpath, $settlement.'/ram:SpecifiedTradeAllowanceCharge[ram:ChargeIndicator/udt:Indicator="false"]/ram:ActualAmount'));
+        $this->assertSame('Discount', $this->singleXPathValue($xpath, $settlement.'/ram:SpecifiedTradeAllowanceCharge[ram:ChargeIndicator/udt:Indicator="false"]/ram:Reason'));
+        $this->assertSame($expectedAmounts['line_total'], $this->singleXPathValue($xpath, $summation.'/ram:LineTotalAmount'));
+        $this->assertSame($expectedAmounts['allowance'], $this->singleXPathValue($xpath, $summation.'/ram:AllowanceTotalAmount'));
+        $this->assertSame($expectedAmounts['tax_basis'], $this->singleXPathValue($xpath, $summation.'/ram:TaxBasisTotalAmount'));
+        $this->assertSame($expectedAmounts['tax_total'], $this->singleXPathValue($xpath, $summation.'/ram:TaxTotalAmount'));
+        $this->assertSame($expectedAmounts['grand_total'], $this->singleXPathValue($xpath, $summation.'/ram:GrandTotalAmount'));
     }
 
     /**
@@ -233,6 +293,72 @@ class ZugferdXmlValidationTest extends TestCase
         return $items;
     }
 
+    private function discountedLineItem(float $cost, float $quantity, float $discount): InvoiceItem
+    {
+        $item = new InvoiceItem();
+        $item->product_key = 'Discounted consulting';
+        $item->notes = 'Line allowance validation';
+        $item->quantity = $quantity;
+        $item->cost = $cost;
+        $item->discount = $discount;
+        $item->is_amount_discount = true;
+        $item->tax_name1 = 'MwSt';
+        $item->tax_rate1 = 19;
+        $item->tax_id = (string) Product::PRODUCT_TYPE_PHYSICAL;
+        $item->type_id = '1';
+
+        return $item;
+    }
+
+    private function standardRatedNetLine(string $name, float $net): InvoiceItem
+    {
+        $item = new InvoiceItem();
+        $item->product_key = $name;
+        $item->notes = $name;
+        $item->quantity = 1;
+        $item->cost = $net;
+        $item->discount = 0;
+        $item->is_amount_discount = false;
+        $item->tax_name1 = 'MwSt';
+        $item->tax_rate1 = 19;
+        $item->tax_id = (string) Product::PRODUCT_TYPE_PHYSICAL;
+        $item->type_id = '1';
+
+        return $item;
+    }
+
+    /**
+     * @param array<string, string|array<int, string>> $expectedAmounts
+     */
+    private function assertMonetarySummation(string $xml, array $expectedAmounts): void
+    {
+        $dom = new \DOMDocument();
+        $this->assertTrue($dom->loadXML($xml));
+
+        $xpath = new \DOMXPath($dom);
+        $xpath->registerNamespace('ram', 'urn:un:unece:uncefact:data:standard:ReusableAggregateBusinessInformationEntity:100');
+
+        $settlement = '//ram:ApplicableHeaderTradeSettlement';
+        $tax = $settlement.'/ram:ApplicableTradeTax[ram:CategoryCode="S"]';
+        $summation = $settlement.'/ram:SpecifiedTradeSettlementHeaderMonetarySummation';
+
+        $this->assertSame($expectedAmounts['basis'], $this->singleXPathValue($xpath, $tax.'/ram:BasisAmount'));
+        $this->assertSame($expectedAmounts['calculated'], $this->singleXPathValue($xpath, $tax.'/ram:CalculatedAmount'));
+        $this->assertSame($expectedAmounts['rate'], $this->singleXPathValue($xpath, $tax.'/ram:RateApplicablePercent'));
+        $this->assertSame($expectedAmounts['line_total'], $this->singleXPathValue($xpath, $summation.'/ram:LineTotalAmount'));
+        $this->assertSame($expectedAmounts['tax_basis'], $this->singleXPathValue($xpath, $summation.'/ram:TaxBasisTotalAmount'));
+        $this->assertSame($expectedAmounts['tax_total'], $this->singleXPathValue($xpath, $summation.'/ram:TaxTotalAmount'));
+        $this->assertSame($expectedAmounts['grand_total'], $this->singleXPathValue($xpath, $summation.'/ram:GrandTotalAmount'));
+
+        foreach ($expectedAmounts['lines'] ?? [] as $index => $net) {
+            $position = $index + 1;
+            $line = '(//ram:IncludedSupplyChainTradeLineItem)['.$position.']';
+
+            $this->assertSame($net, $this->singleXPathValue($xpath, $line.'/ram:SpecifiedLineTradeSettlement/ram:SpecifiedTradeSettlementLineMonetarySummation/ram:LineTotalAmount'));
+            $this->assertSame($expectedAmounts['rate'], $this->singleXPathValue($xpath, $line.'/ram:SpecifiedLineTradeSettlement/ram:ApplicableTradeTax/ram:RateApplicablePercent'));
+        }
+    }
+
     // =========================================================================
     // XSD-only validation tests (no Saxon required)
     // =========================================================================
@@ -339,6 +465,65 @@ class ZugferdXmlValidationTest extends TestCase
 
         $xml = $invoice->service()->getEInvoice();
         $this->assertXmlValid($xml, $this->zug_16931, 'DE-to-DE standard 19% tax');
+    }
+
+    /**
+     * Line-item VAT at 19%:
+     *   10.33 → 1.9627 → 1.96
+     *   10.33 → 1.9627 → 1.96
+     *   10.34 → 1.9646 → 1.96
+     *   sum of rounded line VAT = 5.88
+     *
+     * EN 16931 BR-CO-17 calculates the category tax as round(31.00 × 19%, 2) = 5.89.
+     * The ZUGFeRD document follows the invoice (5.88) and must still validate.
+     */
+    public function testValidationEn16931LineItemVatRounding(): void
+    {
+        $this->requireSaxon();
+
+        $data = $this->setupTestData([
+            'company_vat' => 'DE923356489',
+            'company_country' => 'DE',
+            'client_country' => 'DE',
+            'client_vat' => 'DE923356488',
+            'classification' => 'business',
+            'has_valid_vat' => true,
+        ]);
+
+        $invoice = $data['invoice'];
+        $invoice->discount = 0;
+        $invoice->is_amount_discount = false;
+        $invoice->line_items = [
+            $this->standardRatedNetLine('Item 1', 10.33),
+            $this->standardRatedNetLine('Item 2', 10.33),
+            $this->standardRatedNetLine('Item 3', 10.34),
+        ];
+        $invoice = $invoice->calc()->getInvoice();
+
+        $this->assertEquals(31.00, round((float) $invoice->calc()->getSubTotal(), 2));
+
+        $lineTaxes = array_map(
+            fn ($item) => round((float) $item->tax_amount, 2),
+            $invoice->line_items
+        );
+        $this->assertSame([1.96, 1.96, 1.96], $lineTaxes);
+        $this->assertSame(5.88, round(array_sum($lineTaxes), 2));
+        $this->assertEquals(5.88, round((float) $invoice->total_taxes, 2));
+        $this->assertEquals(36.88, round((float) $invoice->amount, 2));
+
+        $xml = $invoice->service()->getEInvoice();
+
+        $this->assertMonetarySummation($xml, [
+            'basis' => '31.00',
+            'calculated' => '5.88',
+            'rate' => '19.00',
+            'line_total' => '31.00',
+            'tax_basis' => '31.00',
+            'tax_total' => '5.88',
+            'grand_total' => '36.88',
+            'lines' => ['10.33', '10.33', '10.34'],
+        ]);
+        $this->assertXmlValid($xml, $this->zug_16931, 'EN 16931 line-item VAT rounding 10.33/10.33/10.34 at 19%');
     }
 
     public function testValidationDeToDeReducedTax(): void
@@ -658,6 +843,121 @@ class ZugferdXmlValidationTest extends TestCase
 
         $xml = $invoice->service()->getEInvoice();
         $this->assertXmlValid($xml, $this->zug_16931, 'line item percent discount');
+    }
+
+    public function testFinalXrechnungXmlContainsExclusiveLineAllowance(): void
+    {
+        $this->requireSaxon();
+
+        $data = $this->setupTestData([
+            'company_vat' => 'DE923356489',
+            'company_country' => 'DE',
+            'client_country' => 'DE',
+            'client_vat' => 'DE923356488',
+            'classification' => 'business',
+            'has_valid_vat' => true,
+        ]);
+
+        $invoice = $data['invoice'];
+        $invoice->discount = 0;
+        $invoice->is_amount_discount = true;
+        $invoice->line_items = [$this->discountedLineItem(500, 2, 200)];
+        $invoice = $invoice->calc()->getInvoice();
+
+        $xml = $invoice->service()->getEInvoice();
+
+        $this->assertLineAllowance($xml, '500.00', '200.00', '800.00');
+        $this->assertXmlValid($xml, $this->zug_16931, 'exclusive line allowance EN 16931');
+        $this->assertXmlValid($xml, $this->xrechnung_cii, 'exclusive line allowance XRechnung');
+    }
+
+    public function testFinalXrechnungXmlContainsInclusiveLineAllowance(): void
+    {
+        $this->requireSaxon();
+
+        $data = $this->setupTestData([
+            'company_vat' => 'DE923356489',
+            'company_country' => 'DE',
+            'client_country' => 'DE',
+            'client_vat' => 'DE923356488',
+            'classification' => 'business',
+            'has_valid_vat' => true,
+            'uses_inclusive_taxes' => true,
+        ]);
+
+        $invoice = $data['invoice'];
+        $invoice->uses_inclusive_taxes = true;
+        $invoice->discount = 0;
+        $invoice->is_amount_discount = true;
+        $invoice->line_items = [$this->discountedLineItem(595, 2, 238)];
+        $invoice = $invoice->calc()->getInvoice();
+
+        $xml = $invoice->service()->getEInvoice();
+
+        $this->assertLineAllowance($xml, '500.00', '200.00', '800.00');
+        $this->assertXmlValid($xml, $this->zug_16931, 'inclusive line allowance EN 16931');
+        $this->assertXmlValid($xml, $this->xrechnung_cii, 'inclusive line allowance XRechnung');
+    }
+
+    public function testFinalXrechnungXmlContainsPercentageLineAllowance(): void
+    {
+        $this->requireSaxon();
+
+        $data = $this->setupTestData([
+            'company_vat' => 'DE923356489',
+            'company_country' => 'DE',
+            'client_country' => 'DE',
+            'client_vat' => 'DE923356488',
+            'classification' => 'business',
+            'has_valid_vat' => true,
+        ]);
+
+        $invoice = $data['invoice'];
+        $invoice->discount = 0;
+        $invoice->is_amount_discount = false;
+        $invoice->line_items = [$this->discountedLineItem(500, 2, 20)];
+        $invoice = $invoice->calc()->getInvoice();
+
+        $xml = $invoice->service()->getEInvoice();
+
+        $this->assertLineAllowance($xml, '500.00', '200.00', '800.00');
+        $this->assertXmlValid($xml, $this->zug_16931, 'percentage line allowance EN 16931');
+        $this->assertXmlValid($xml, $this->xrechnung_cii, 'percentage line allowance XRechnung');
+    }
+
+    public function testFinalXrechnungXmlReconcilesInclusiveLineAndDocumentAllowances(): void
+    {
+        $this->requireSaxon();
+
+        $data = $this->setupTestData([
+            'company_vat' => 'DE923356489',
+            'company_country' => 'DE',
+            'client_country' => 'DE',
+            'client_vat' => 'DE923356488',
+            'classification' => 'business',
+            'has_valid_vat' => true,
+            'uses_inclusive_taxes' => true,
+        ]);
+
+        $invoice = $data['invoice'];
+        $invoice->uses_inclusive_taxes = true;
+        $invoice->discount = 119;
+        $invoice->is_amount_discount = true;
+        $invoice->line_items = [$this->discountedLineItem(595, 2, 238)];
+        $invoice = $invoice->calc()->getInvoice();
+
+        $xml = $invoice->service()->getEInvoice();
+
+        $this->assertLineAllowance($xml, '500.00', '200.00', '800.00');
+        $this->assertHeaderAmounts($xml, [
+            'line_total' => '800.00',
+            'allowance' => '100.00',
+            'tax_basis' => '700.00',
+            'tax_total' => '133.00',
+            'grand_total' => '833.00',
+        ]);
+        $this->assertXmlValid($xml, $this->zug_16931, 'inclusive line and document allowances EN 16931');
+        $this->assertXmlValid($xml, $this->xrechnung_cii, 'inclusive line and document allowances XRechnung');
     }
 
     public function testValidationWithDocumentAndLineDiscountsCombined(): void
