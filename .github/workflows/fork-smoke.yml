@@ -1,0 +1,27 @@
+name: "CI: Fork Smoke"
+
+on:
+  push:
+    branches: [v5-stable]
+  pull_request:
+    branches: [v5-stable]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    if: github.repository == 'yashiels/invoiceninja'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Run Fork Smoke Checks
+        run: bash tests/fork-smoke.sh

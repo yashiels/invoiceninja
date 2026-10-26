@@ -405,7 +405,7 @@ class CompanyExport implements ShouldQueue
             $project = $this->transformBasicEntities($project);
             $project = $this->transformArrayOfKeys($project, ['client_id']);
 
-            return $this->withoutRelations($project->makeVisible(['id']));
+            return $this->withoutRelations($project->makeHidden(['hash', 'meta'])->makeVisible(['id']));
         })->all();
 
 
@@ -418,7 +418,13 @@ class CompanyExport implements ShouldQueue
             $quote = $this->transformBasicEntities($quote);
             $quote = $this->transformArrayOfKeys($quote, ['invoice_id','recurring_id','client_id', 'vendor_id', 'project_id', 'design_id', 'subscription_id', 'location_id']);
 
-            return $this->withoutRelations($quote->makeVisible(['id']));
+            $status_id = $quote->getAttributes()['status_id'];
+            $data = $quote->makeVisible(['id'])
+                ->makeHidden(['status_id'])
+                ->attributesToArray();
+            $data['status_id'] = $status_id;
+
+            return $data;
         })->all();
 
 
@@ -589,7 +595,7 @@ class CompanyExport implements ShouldQueue
 
         $this->export_data['purchase_orders'] = $this->company->purchase_orders()->orderBy('number', 'DESC')->cursor()->map(function ($purchase_order) {
             $purchase_order = $this->transformBasicEntities($purchase_order);
-            $purchase_order = $this->transformArrayOfKeys($purchase_order, ['expense_id','client_id', 'vendor_id', 'project_id', 'design_id', 'subscription_id','project_id', 'location_id']);
+            $purchase_order = $this->transformArrayOfKeys($purchase_order, ['expense_id','client_id', 'vendor_id', 'project_id', 'design_id', 'subscription_id','project_id', 'location_id', 'invoice_id', 'quote_id']);
 
             return $this->withoutRelations($purchase_order->makeVisible(['id',
                 'private_notes',
@@ -751,6 +757,8 @@ class CompanyExport implements ShouldQueue
         $this->company->backups()->chunk(100, function ($backups) use ($zip) {
 
             foreach ($backups as $backup) {
+
+            /** @var \App\Models\Backup $backup */
                 try {
                     $content = $backup->getFile();
 
@@ -800,7 +808,9 @@ class CompanyExport implements ShouldQueue
         $zip = $this->zipBackups($zip);
         $zip->close();
 
-        Storage::disk(config('filesystems.default'))->put('backups/' . str_replace(".json", ".zip", $this->file_name), file_get_contents($zip_path));
+        $disk = Ninja::isHosted() ? config('filesystems.default') : config('filesystems.protected_download_disk');
+        $storage_path = 'backups/' . str_replace(".json", ".zip", $this->file_name);
+        Storage::disk($disk)->put($storage_path, file_get_contents($zip_path));
 
         if (file_exists($zip_path)) {
             unlink($zip_path);
@@ -810,16 +820,16 @@ class CompanyExport implements ShouldQueue
             unlink(sys_get_temp_dir() . '/' . $this->file_name);
         }
 
-        if (Ninja::isSelfHost()) {
-            $storage_path = 'backups/' . str_replace(".json", ".zip", $this->file_name);
-        } else {
-            $storage_path = Storage::disk(config('filesystems.default'))->path('backups/' . str_replace(".json", ".zip", $this->file_name));
-        }
-
         $url = Cache::get($this->hash);
 
-        $ttl = $this->total_activities > 10000 ? 18000 : 3600;
-        Cache::put($this->hash, $storage_path, $ttl);
+        $ttl = 43200; // 12 hours
+
+        Cache::put($this->hash, [
+            'disk' => $disk, 
+            'path' => $storage_path, 
+            'download_name' => str_replace(".json", ".zip", $this->file_name), 
+            'expires_at' => time() + $ttl
+            ], $ttl);
 
         App::forgetInstance('translator');
         $t = app('translator');
@@ -839,7 +849,7 @@ class CompanyExport implements ShouldQueue
             ctrans('texts.download_backup_subject', ['company' => $this->company->present()->name()]),
         );
 
-        UnlinkFile::dispatch(config('filesystems.default'), $storage_path)->delay(now()->addHours($this->total_activities > 10000 ? 5 : 1));
+        UnlinkFile::dispatch($disk, $storage_path)->delay(now()->addHours($this->total_activities > 10000 ? 5 : 1));
 
         if (Ninja::isHosted()) {
             sleep(3);

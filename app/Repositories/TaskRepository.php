@@ -13,12 +13,14 @@
 namespace App\Repositories;
 
 use App\DataMapper\TaskMeta;
-use App\Models\Task;
-use App\Models\Project;
 use App\Factory\TaskFactory;
 use App\Jobs\Task\TaskAssigned;
-use App\Utils\Traits\MakesHash;
+use App\Models\Client;
+use App\Models\Project;
+use App\Models\Task;
+use App\Models\User;
 use App\Utils\Traits\GeneratesCounter;
+use App\Utils\Traits\MakesHash;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\QueryException;
@@ -176,6 +178,8 @@ class TaskRepository extends BaseRepository
 
         $lockKey = $this->new_task ? $this->calendarEventLockKey($data, $task) : null;
 
+        $original_assigned_user_id = $task->assigned_user_id;
+
         if ($lockKey) {
             try {
                 $data = Cache::lock($lockKey, self::CALENDAR_EVENT_LOCK_SECONDS)
@@ -197,10 +201,6 @@ class TaskRepository extends BaseRepository
 
             $task->fill($data);
             $task->saveQuietly();
-        }
-
-        if (isset($data['assigned_user_id']) && $data['assigned_user_id'] != $task->assigned_user_id) {
-            TaskAssigned::dispatch($task, $task->company->db)->delay(2);
         }
 
         $this->init($task);
@@ -305,6 +305,11 @@ class TaskRepository extends BaseRepository
         $task->time_log = json_encode($time_log);
 
         $task->saveQuietly();
+
+        // Compare with the assignee from before fill(), and dispatch after the final save so a new task has its number.
+        if (isset($data['assigned_user_id']) && $data['assigned_user_id'] != $original_assigned_user_id) {
+            TaskAssigned::dispatch($task, $task->company->db)->delay(2);
+        }
 
         if (array_key_exists('documents', $data)) {
             $this->saveDocuments($data['documents'], $task);
@@ -590,9 +595,9 @@ class TaskRepository extends BaseRepository
         if ($column === 'project_id') {
             // Handle project_id updates with client_id synchronization
             $project = Project::withTrashed()
-                ->where('id', $new_value)
-                ->company()
-                ->first();
+                            ->where('id', $new_value)
+                            ->company()
+                            ->first();
 
             if ($project) {
                 /** @var \App\Models\Project $project */
@@ -602,8 +607,28 @@ class TaskRepository extends BaseRepository
                 ]);
             }
         } elseif ($column === 'client_id') {
+
+            $client = Client::withTrashed()
+                    ->where('id', $new_value)
+                    ->company()
+                    ->first();
+
+            if ($client) {
             // If you are updating the client - we will unset the project id!
-            $models->update([$column => $new_value, 'project_id' => null]);
+                $models->update(['client_id' => $client->id, 'project_id' => null]);
+            }
+            
+        } elseif ($column === 'assigned_user_id') {
+
+            $user = User::withTrashed()
+                    ->where('id', $new_value)
+                    ->where('account_id', auth()->user()->account_id)
+                    ->first();
+
+            if ($user) {
+                $models->update(['assigned_user_id' => $user->id]);
+            }
+            
         } else {
             // Assigned User
             $models->update([$column => $new_value]);
